@@ -31,6 +31,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
+class AuthFailed(RuntimeError):
+    """The API rejected the key. Aborts the whole run rather than repeating per function."""
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import pr_linkcheck as _linkcheck  # noqa: E402   the repo's own verification gate
@@ -290,6 +294,13 @@ def work_one(row, cfg, attempts, live=False):
             text, a, b = call_model(messages, cfg)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
+            # A rejected key is not a property of this function, so reporting it as div=999 and
+            # moving to the next target is wrong twice: it buries the real cause behind a number
+            # that means "the C did not match", and it re-asks a question already answered for
+            # every remaining function. A 401/403 will not fix itself between calls. Raise so the
+            # run stops and SAYS what happened.
+            if e.code in (401, 403):
+                raise AuthFailed(f"HTTP {e.code}: {detail}")
             return {"name": name, "matched": False, "divergences": 999, "attempts": attempt,
                     "c_source": None, "note": f"HTTP {e.code}: {detail}", "log": att_log,
                     "orig_div": None}, tin, tout
@@ -398,7 +409,17 @@ def main():
         # as_completed, not map: map yields in submission order, so one slow target holds back every
         # result behind it and the viewer's bar sits at zero while work is actually finishing.
         for f in as_completed(futs):
-            res, i_tok, o_tok = f.result()
+            try:
+                res, i_tok, o_tok = f.result()
+            except AuthFailed as e:
+                for other in futs:
+                    other.cancel()
+                sys.exit(
+                    f"\nauthentication failed - the API rejected the key, so nothing was attempted.\n"
+                    f"  {e}\n"
+                    f"Fix the key for this agent in Console's vault (GLM_API_KEY) and re-run. "
+                    f"No targets were consumed and nothing was banked."
+                )
             tin += i_tok
             tout += o_tok
             results.append(res)

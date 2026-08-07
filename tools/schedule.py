@@ -250,12 +250,17 @@ def main():
     ap.add_argument("--max", type=lambda x: int(x, 0), default=0x200, help="largest function size to offer")
     ap.add_argument("--limit", type=int, default=24)
     ap.add_argument("--random", action="store_true", help="shuffle rather than smallest-first")
-    ap.add_argument(
-        "--similar",
-        action="store_true",
-        help="rank by opcode similarity to already-matched functions and attach those as worked "
-        "examples, rather than smallest-first. Needs extracted/ for the ROM bytes.",
-    )
+    # Similarity ranking is the DEFAULT, falling back to smallest-first automatically when it
+    # cannot rank (no extracted/, or nothing matched yet to compare against). It shipped opt-in
+    # "until it has a measured hit rate on this repo", which was a mistake: nothing that calls this
+    # tool passes flags, so it could never be turned on and therefore could never earn one.
+    # Meanwhile smallest-first is a stable sort, so it re-serves the same unworkable head every
+    # run - two separate drives spent their whole budget on FUN_0232dc4c / FUN_0232e6bc /
+    # FUN_0232e9a8 before anyone noticed they were the first three either way.
+    ap.add_argument("--similar", dest="similar", action="store_true", default=None,
+                    help="force similarity ranking (already the default wherever it can rank)")
+    ap.add_argument("--no-similar", dest="similar", action="store_false",
+                    help="plain smallest-first: skip similarity ranking and worked examples")
     ap.add_argument("--k", type=int, default=2, help="--similar: worked examples attached per target")
     ap.add_argument(
         "--jmin", type=float, default=0.55,
@@ -307,14 +312,14 @@ def main():
             rows.append(f)
         # Smallest first is the useful default: short functions match more often per unit of
         # effort, so a batch of them lands more work than the same count of large ones.
-        if args.similar:
-            pool = _example_pool(corpus, matched_keys)
-            if not pool:
-                sys.exit(
-                    "--similar has nothing to rank against: it needs extracted/ (for ROM bytes) "
-                    "and matched sources under src/. Run tools/extract_pictochat.py, or drop "
-                    "--similar to fall back to smallest-first."
-                )
+        pool = [] if args.similar is False else _example_pool(corpus, matched_keys)
+        if args.similar is not False and not pool:
+            # Cannot rank: no extracted/ ROM bytes, or nothing matched yet to compare against.
+            # Fall back rather than exit - being the default means never refusing to produce a
+            # worklist. Explicit --similar still says so out loud, since the user asked for it.
+            print("similarity ranking unavailable (needs extracted/ and matched sources) - "
+                  "falling back to smallest-first", file=sys.stderr)
+        if pool:
             ranked = []
             for f in rows:
                 ops = _opseq(f.get("bytes"), f.get("mode"))
