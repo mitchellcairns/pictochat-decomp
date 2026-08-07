@@ -204,6 +204,24 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b) if (a or b) else 0.0
 
 
+def _parked_divergences():
+    """addr -> recorded divergence count for every parked NONMATCHING draft."""
+    out = {}
+    p = REPO / "progress" / "nonmatching.jsonl"
+    if not p.is_file():
+        return out
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+            out[int(str(r["addr"]), 0)] = r.get("divergences")
+        except (ValueError, KeyError):
+            continue
+    return out
+
+
 def _example_pool(corpus, matched_keys):
     """Functions usable as worked examples: matched, with extractable bytes, and carrying a
     committed source that is NOT a parked `// NONMATCHING` draft. Showing a model a draft that
@@ -285,6 +303,14 @@ def main():
         parked = ledger.nonmatching_set()
         done = matched_keys
         corpus = [f for f in corpus if ledger.make_key(f["module"], f["addr"]) in parked]
+        # Attach each parked draft and its recorded divergence count. A refine target without its
+        # draft is just a from-scratch target wearing a different label.
+        divs = _parked_divergences()
+        for f in corpus:
+            src = _src_text(f["name"], f["module"])
+            if src:
+                f["draft"] = src
+                f["divergences"] = divs.get(f["addr"])
     else:
         done = set() if args.include_done else (ledger.load_done() | matched_keys)
 
@@ -352,6 +378,14 @@ def main():
             row["target_hex"] = f["bytes"]
         if f.get("mode"):
             row["mode"] = f["mode"]
+        if f.get("draft"):
+            # THE POINT of a refine pass: hand back the parked draft and how far off it is, so the
+            # model improves it instead of rewriting from zero. Without this, refine mode selected
+            # the right functions and then threw away the very work that made them worth selecting -
+            # a draft sitting 3 words from byte-exact was being re-derived from scratch every run.
+            row["draft"] = f["draft"]
+            if f.get("divergences") is not None:
+                row["divergences"] = f["divergences"]
         if f.get("_sibs") is not None:
             # Field names match sm64ds's coddog worklist rows on purpose: drive.py speaks that
             # same protocol, so one driver reads either repo's worklist without a special case.
